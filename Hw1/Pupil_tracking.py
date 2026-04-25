@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-image = cv2.imread("./image.jpeg")
+image = cv2.imread("./images.jpeg")
 blurred_image = cv2.GaussianBlur(image, (7, 7), 0)
 gray_image = cv2.cvtColor(blurred_image, cv2.COLOR_BGR2GRAY)
 ret, _ = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
