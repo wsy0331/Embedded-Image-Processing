@@ -16,16 +16,8 @@
     * 在繪製結果前，程式會讀取圓心座標 `(center_x, center_y)` 的灰階值。
     * **過濾標準**：僅當圓心亮度 $< 50$（即中心為深色區域）時才視為有效目標。
 
+<img width="862" height="254" alt="image" src="https://github.com/user-attachments/assets/8ecff68c-e0f6-426f-be19-3a55ba54648b" />
+
+<img width="934" height="251" alt="image" src="https://github.com/user-attachments/assets/f8c1e3d6-5bf8-49b9-8b6f-7bb369bbd528" />
 
 
----
-
-## Implementation Steps (教學實作過程)
-
-### Step 1: 動態計算邊緣門檻
-避免使用硬編碼（Hard-coded）的數值，利用影像自身的統計特性進行運算。
-```python
-# 取得 Otsu 閥值
-ret, _ = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-# 套用至 Canny
-canny_image = cv2.Canny(gray_image, ret * 0.9, ret)
