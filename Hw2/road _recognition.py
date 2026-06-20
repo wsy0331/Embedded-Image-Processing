@@ -2,137 +2,92 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-def get_roi(image, vertices):
-    """定義感興趣區域 (Region of Interest)"""
-    mask = np.zeros_like(image)
-    # 如果影像是灰階的 (單通道)，忽略顏色通道
-    if len(image.shape) > 2:
-        channel_count = image.shape[2]
-        ignore_mask_color = (255,) * channel_count
-    else:
-        ignore_mask_color = 255
-        
-    cv2.fillPoly(mask, vertices, ignore_mask_color)
-    masked_image = cv2.bitwise_and(image, mask)
-    return masked_image
-
-def draw_lines(image, lines, color=[255, 0, 0], thickness=5):
-    """將檢測到的線段畫在空白畫布上"""
-    line_image = np.zeros_like(image)
-    if lines is not None:
-        for line in lines:
-            for x1, y1, x2, y2 in line:
-                cv2.line(line_image, (x1, y1), (x2, y2), color, thickness)
-    return line_image
-
-def pipeline(image_path):
+def pipeline_no_roi(image_path):
     # ==========================================
     # 0. 讀取圖片
     # ==========================================
     img = cv2.imread(image_path)
     if img is None:
-        raise FileNotFoundError("圖片載入失敗，請確認路徑。")
+        print(f"找不到圖片：{image_path}")
+        return
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # 取得圖片長寬
     height, width = img.shape[:2]
 
-    # ==========================================
-    # 1. 灰階處理 (Grayscale)
-    # ==========================================
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV) #轉換到HSV色彩空間
+    lower_road = np.array([0, 0, 40])   
+    upper_road = np.array([180, 100, 255]) 
+    color_mask = cv2.inRange(hsv, lower_road, upper_road) #顏色遮罩，找出所有可能的馬路色塊
 
-    # ==========================================
-    # 2. 高斯模糊 (Gaussian Blur) - 去除雜訊
-    # ==========================================
-    kernel_size = 5
-    blur = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
-
-    # ==========================================
-    # 3. 邊緣檢測 (Canny Edge Detection)
-    # ==========================================
-    low_threshold = 50
-    high_threshold = 150
-    edges = cv2.Canny(blur, low_threshold, high_threshold)
-
-    # ==========================================
-    # 4. 感興趣區域 (Region of Interest, ROI)
-    # ==========================================
-    # 建立一個梯形範圍 (假設行車記錄器視角，車道在畫面下半部)
-    # 這裡的座標 (x, y) 原點在左上角
-    bottom_left = (width * 0.1, height)
-    bottom_right = (width * 0.9, height)
-    top_left = (width * 0.45, height * 0.6)
-    top_right = (width * 0.55, height * 0.6)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) #灰階處理
+    blur = cv2.GaussianBlur(gray, (7, 7), 0) #高斯模糊
+    edges = cv2.Canny(blur, 30, 100) #Canny邊緣檢測
     
-    roi_vertices = np.array([[bottom_left, top_left, top_right, bottom_right]], dtype=np.int32)
-    roi_edges = get_roi(edges, roi_vertices)
+    # 將邊緣線膨脹 (加粗)，變成一道無法跨越的厚牆
+    kernel_wall = np.ones((5, 5), np.uint8)
+    thick_edges = cv2.dilate(edges, kernel_wall, iterations=3)
 
     # ==========================================
-    # 5. 霍夫變換 (Hough Transform) - 從邊緣找直線
+    # 3. 物理切斷 (顏色 扣除 防波堤)
     # ==========================================
-    rho = 1               # 距離解析度 (像素)
-    theta = np.pi / 180   # 角度解析度 (弧度)
-    threshold = 30        # 交點數量門檻值 (越小找到越多線)
-    min_line_len = 40     # 最短線段長度
-    max_line_gap = 20     # 允許線段之間的最大中斷距離
-
-    lines = cv2.HoughLinesP(roi_edges, rho, theta, threshold, np.array([]), 
-                            minLineLength=min_line_len, maxLineGap=max_line_gap)
-
-    # 將線條畫在全黑的畫布上
-    line_image = draw_lines(img_rgb, lines)
+    # cv2.bitwise_not 會把防波堤變成黑色(0)，其他地方為白色(1)
+    # 這樣交界處就會被強制切出空隙
+    disconnected_mask = cv2.bitwise_and(color_mask, cv2.bitwise_not(thick_edges)) 
 
     # ==========================================
-    # 6. 結果疊加 (Overlay)
+    # 4. 尋找輪廓與根部檢驗 (只留碰到畫面底部的)
     # ==========================================
-    result = cv2.addWeighted(img_rgb, 0.8, line_image, 1, 0)
+    contours, _ = cv2.findContours(disconnected_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    final_road_mask = np.zeros_like(disconnected_mask)
+    
+    if contours:
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 5000:
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # 關鍵防呆：這個形狀必須一直延伸到畫面的最下方 (大於 95%)
+                if (y + h) >= height * 0.95:
+                    cv2.drawContours(final_road_mask, [contour], -1, 255, thickness=cv2.FILLED)
+
+    # 因為剛才扣除了加粗的白線防波堤，馬路邊緣會往內縮水
+    # 所以最後要再把馬路膨脹回來，填滿整個車道
+    final_road_mask = cv2.dilate(final_road_mask, kernel_wall, iterations=3)
 
     # ==========================================
-    # 視覺化顯示過程
+    # 5. 上色疊加
     # ==========================================
+    green_fill = np.zeros_like(img_rgb)
+    green_fill[:] = (0, 255, 0)
+    green_road_only = cv2.bitwise_and(green_fill, green_fill, mask=final_road_mask)
+    final_result = cv2.addWeighted(img_rgb, 1.0, green_road_only, 0.4, 0)
+
+    #圖表顯示
     plt.figure(figsize=(20, 10))
     
-    plt.subplot(2, 3, 1)
+    plt.subplot(1, 4, 1)
     plt.title("1. Original Image")
     plt.imshow(img_rgb)
     plt.axis("off")
 
-    plt.subplot(2, 3, 2)
-    plt.title("2. Grayscale & Blur")
-    plt.imshow(blur, cmap='gray')
+    plt.subplot(1, 4, 2)
+    plt.title("2. Thick Edges (The Walls)")
+    plt.imshow(thick_edges, cmap='gray')
     plt.axis("off")
 
-    plt.subplot(2, 3, 3)
-    plt.title("3. Canny Edges")
-    plt.imshow(edges, cmap='gray')
+    plt.subplot(1, 4, 3)
+    plt.title("3. Disconnected Mask")
+    plt.imshow(disconnected_mask, cmap='gray')
     plt.axis("off")
 
-    plt.subplot(2, 3, 4)
-    plt.title("4. ROI Masked Edges")
-    plt.imshow(roi_edges, cmap='gray')
-    
-    # 在畫布上畫出 ROI 的紅線框，方便你檢查位置
-    pts = roi_vertices.reshape((-1, 1, 2))
-    roi_visual = cv2.polylines(img_rgb.copy(), [pts], isClosed=True, color=(255, 0, 0), thickness=3)
-    plt.imshow(roi_visual, alpha=0.3) 
-    plt.axis("off")
-
-    plt.subplot(2, 3, 5)
-    plt.title("5. Detected Lines")
-    plt.imshow(line_image)
-    plt.axis("off")
-
-    plt.subplot(2, 3, 6)
-    plt.title("6. Final Result")
-    plt.imshow(result)
+    plt.subplot(1, 4, 4)
+    plt.title("4. Final No-ROI Result")
+    plt.imshow(final_result)
     plt.axis("off")
 
     plt.tight_layout()
     plt.show()
 
-# 執行程式
 if __name__ == "__main__":
-    # 替換成你的馬路圖片路徑
-    IMAGE_PATH = "test4.jpg" 
-    pipeline(IMAGE_PATH)
+    IMAGE_PATH = "test2.jpg"
+    pipeline_no_roi(IMAGE_PATH)
+    
